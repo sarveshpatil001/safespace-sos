@@ -88,43 +88,48 @@ export default function Dashboard() {
   }, [activeEvent]);
 
   const captureLocation = useCallback(
-    async (eventId: Id<"emergencyEvents">) => {
-      if (!("geolocation" in navigator)) {
-        setGeoStatus("UNSUPPORTED");
-        await setLocation({
-          eventId,
-          status: "UNSUPPORTED",
-        }).catch(() => {});
-        return;
-      }
-      navigator.geolocation.getCurrentPosition(
-        async (pos) => {
-          setGeoStatus("AVAILABLE");
-          try {
-            await setLocation({
-              eventId,
-              status: "AVAILABLE",
-              latitude: pos.coords.latitude,
-              longitude: pos.coords.longitude,
-              accuracy: pos.coords.accuracy,
-            });
-          } catch {
-            /* event may have been closed concurrently */
-          }
-        },
-        async (err) => {
-          const status: GeoStatus =
-            err.code === err.PERMISSION_DENIED
-              ? "DENIED"
-              : err.code === err.POSITION_UNAVAILABLE
-                ? "UNAVAILABLE"
-                : "TIMEOUT";
-          setGeoStatus(status);
-          await setLocation({ eventId, status }).catch(() => {});
-        },
-        { enableHighAccuracy: true, timeout: 10_000, maximumAge: 30_000 },
-      );
-    },
+    (eventId: Id<"emergencyEvents">) =>
+      // Resolves only after the geolocation outcome has been recorded, so the
+      // caller can sequence notifications AFTER coordinates exist (otherwise
+      // the emergency email is sent before the location is captured).
+      new Promise<void>((resolve) => {
+        if (!("geolocation" in navigator)) {
+          setGeoStatus("UNSUPPORTED");
+          setLocation({ eventId, status: "UNSUPPORTED" })
+            .catch(() => {})
+            .finally(resolve);
+          return;
+        }
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            setGeoStatus("AVAILABLE");
+            try {
+              await setLocation({
+                eventId,
+                status: "AVAILABLE",
+                latitude: pos.coords.latitude,
+                longitude: pos.coords.longitude,
+                accuracy: pos.coords.accuracy,
+              });
+            } catch {
+              /* event may have been closed concurrently */
+            }
+            resolve();
+          },
+          async (err) => {
+            const status: GeoStatus =
+              err.code === err.PERMISSION_DENIED
+                ? "DENIED"
+                : err.code === err.POSITION_UNAVAILABLE
+                  ? "UNAVAILABLE"
+                  : "TIMEOUT";
+            setGeoStatus(status);
+            await setLocation({ eventId, status }).catch(() => {});
+            resolve();
+          },
+          { enableHighAccuracy: true, timeout: 10_000, maximumAge: 30_000 },
+        );
+      }),
     [setLocation],
   );
 
