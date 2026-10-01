@@ -33,7 +33,7 @@ import {
   Siren,
   XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { toast } from "sonner";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -290,7 +290,10 @@ export default function Dashboard() {
                       Trusted contacts
                     </div>
                     <p className="mt-1.5 text-sm text-muted-foreground">
-                      {notifLabel[notificationStatus] ?? notificationStatus}
+                      {notificationStatus === "PENDING" &&
+                      activeEvent.notificationsAttemptedAt !== undefined
+                        ? "Notifications are being sent…"
+                        : (notifLabel[notificationStatus] ?? notificationStatus)}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground/80">
                       {activeContacts.length} active contact

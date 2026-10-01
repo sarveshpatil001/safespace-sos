@@ -3,6 +3,32 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 
+/**
+ * Server-side coordinate validation. The browser is the only legitimate
+ * source, but never trust that: garbage coordinates would poison map links,
+ * the live-share page, and contact emails.
+ */
+function validateCoords(
+  latitude: number | undefined,
+  longitude: number | undefined,
+  accuracy: number | undefined,
+): { latitude: number; longitude: number; accuracy: number | undefined } {
+  if (
+    typeof latitude !== "number" ||
+    typeof longitude !== "number" ||
+    latitude < -90 ||
+    latitude > 90 ||
+    longitude < -180 ||
+    longitude > 180
+  ) {
+    throw new Error("Invalid coordinates");
+  }
+  if (accuracy !== undefined && (accuracy < 0 || accuracy > 100_000)) {
+    throw new Error("Invalid accuracy");
+  }
+  return { latitude, longitude, accuracy };
+}
+
 // ---------------------------------------------------------------------------
 // Emergency events: creation, location, closure, pings
 // ---------------------------------------------------------------------------
@@ -20,6 +46,7 @@ export const activeEvent = query({
       liveSharing: v.boolean(),
       shareToken: v.optional(v.string()),
       notificationStatus: v.string(),
+      notificationsAttemptedAt: v.optional(v.number()),
       createdAt: v.number(),
     }),
     v.null(),
@@ -177,18 +204,13 @@ export const setLocation = mutation({
 
     const now = Date.now();
     if (args.status === "AVAILABLE") {
-      if (
-        typeof args.latitude !== "number" ||
-        typeof args.longitude !== "number"
-      ) {
-        throw new Error("Coordinates required when status is AVAILABLE");
-      }
+      const coords = validateCoords(args.latitude, args.longitude, args.accuracy);
       await ctx.db.patch(args.eventId, {
         status: ev.status === "CREATED" ? "ACTIVE" : ev.status,
         locationStatus: "AVAILABLE",
-        latitude: args.latitude,
-        longitude: args.longitude,
-        accuracy: args.accuracy,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        accuracy: coords.accuracy,
         locationCapturedAt: now,
         liveSharing: true,
         shareToken: ev.shareToken ?? generateToken(),
@@ -197,9 +219,9 @@ export const setLocation = mutation({
       await ctx.db.insert("locationPings", {
         eventId: args.eventId,
         userId,
-        latitude: args.latitude,
-        longitude: args.longitude,
-        accuracy: args.accuracy,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        accuracy: coords.accuracy,
         capturedAt: now,
         createdAt: now,
       });
@@ -270,15 +292,16 @@ export const pingLocation = mutation({
     if (!ev || ev.userId !== userId) throw new Error("Event not found");
     if (ev.status === "RESOLVED" || ev.status === "CANCELLED") return null;
 
+    const coords = validateCoords(args.latitude, args.longitude, args.accuracy);
     const now = Date.now();
     await ctx.db.patch(args.eventId, {
       lastPingAt: now,
-      lastLatitude: args.latitude,
-      lastLongitude: args.longitude,
-      lastAccuracy: args.accuracy,
-      latitude: args.latitude,
-      longitude: args.longitude,
-      accuracy: args.accuracy,
+      lastLatitude: coords.latitude,
+      lastLongitude: coords.longitude,
+      lastAccuracy: coords.accuracy,
+      latitude: coords.latitude,
+      longitude: coords.longitude,
+      accuracy: coords.accuracy,
       locationStatus: "AVAILABLE",
       locationCapturedAt: now,
       updatedAt: now,
@@ -328,7 +351,6 @@ export const shareByToken = query({
   args: { token: v.string() },
   returns: v.union(
     v.object({
-      eventId: v.id("emergencyEvents"),
       userName: v.optional(v.string()),
       status: v.string(),
       locationStatus: v.string(),
@@ -350,8 +372,8 @@ export const shareByToken = query({
     if (!ev.liveSharing || ev.shareRevokedAt) return null;
     if (ev.status === "RESOLVED" || ev.status === "CANCELLED") return null;
     const user = await ctx.db.get(ev.userId);
+    // Minimum disclosure: no internal event ID, no notification details.
     return {
-      eventId: ev._id,
       userName: user?.name,
       status: ev.status,
       locationStatus: ev.locationStatus,

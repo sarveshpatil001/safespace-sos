@@ -24,7 +24,7 @@ export default function Share() {
   );
 
   const mapsUrl =
-    share?.latitude !== undefined && share?.latitude !== null
+    share?.latitude !== undefined && share?.longitude !== undefined
       ? `https://www.google.com/maps?q=${share.latitude},${share.longitude}`
       : null;
 

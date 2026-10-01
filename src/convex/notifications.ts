@@ -19,13 +19,21 @@ import { internal } from "./_generated/api";
  * confirmation.
  */
 
+type AttemptRow = {
+  status: string;
+  channel: string;
+  contactId?: string;
+};
+
 async function computeStatus(
   ctx: { db: any },
   eventId: string,
 ): Promise<string> {
-  const attempts = await ctx.db
+  const attempts: AttemptRow[] = await ctx.db
     .query("notificationAttempts")
-    .withIndex("by_event", (q: any) => q.eq("eventId", eventId))
+    .withIndex("by_event", (q: { eq: (f: string, v: string) => unknown }) =>
+      q.eq("eventId", eventId),
+    )
     .collect();
   const anySent = attempts.some((a: { status: string }) => a.status === "SENT");
   const anyFailed = attempts.some(
@@ -55,6 +63,9 @@ export const notifyContacts = mutation({
 
     const ev = await ctx.db.get(args.eventId);
     if (!ev || ev.userId !== userId) throw new Error("Event not found");
+    if (ev.status === "RESOLVED" || ev.status === "CANCELLED") {
+      throw new Error("Event is closed");
+    }
 
     const user = await ctx.db.get(userId);
     const contacts = await ctx.db
@@ -69,6 +80,19 @@ export const notifyContacts = mutation({
     // schedule real sends here the same way email is handled.
     const smsConfigured = false;
 
+    // Abuse cap: at most one scheduled email attempt per contact per event.
+    // Without this, calling notifyContacts in a loop would stack scheduler
+    // runs and blast the real email provider repeatedly.
+    const existingAttempts = await ctx.db
+      .query("notificationAttempts")
+      .withIndex("by_event", (q) => q.eq("eventId", args.eventId))
+      .collect();
+    const alreadyScheduled = new Set(
+      existingAttempts
+        .filter((a) => a.channel === "email")
+        .map((a) => a.contactId),
+    );
+
     const now = Date.now();
     let scheduled = 0;
     let skipped = 0;
@@ -80,8 +104,9 @@ export const notifyContacts = mutation({
 
       for (const channel of channels) {
         if (channel === "email") {
-          if (contact.email && emailConfigured) {
+          if (!alreadyScheduled.has(contact._id) && contact.email && emailConfigured) {
             scheduled++;
+            alreadyScheduled.add(contact._id);
             await ctx.scheduler.runAfter(
               0,
               internal.safeSpaceActions.sendEmail,
