@@ -55,8 +55,8 @@ const GEO_MESSAGES: Record<GeoStatus, string> = {
   UNSUPPORTED: "This browser does not support geolocation",
 };
 
-function formatDuration(fromMs: number): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - fromMs) / 1000));
+function formatDuration(fromMs: number, nowMs: number): string {
+  const seconds = Math.max(0, Math.floor((nowMs - fromMs) / 1000));
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}m ${String(s).padStart(2, "0")}s`;
@@ -78,11 +78,11 @@ export default function Dashboard() {
   const [starting, setStarting] = useState(false);
   const [geoStatus, setGeoStatus] = useState<GeoStatus>("PENDING");
   const [now, setNow] = useState(Date.now());
-  const notifiedForEvent = useRef<string | null>(null);
 
-  // Tick every second while an event is live.
+  // Tick every second while an event is live so the elapsed timer moves.
   useEffect(() => {
     if (!activeEvent) return;
+    setNow(Date.now());
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [activeEvent]);
@@ -135,7 +135,6 @@ export default function Dashboard() {
       const { eventId } = await createEvent({});
       await captureLocation(eventId);
       await notifyContacts({ eventId });
-      notifiedForEvent.current = eventId;
       setConfirmOpen(false);
     } catch (err) {
       toast.error(
@@ -148,7 +147,6 @@ export default function Dashboard() {
   };
 
   // Live pings every 30s while an event is ACTIVE.
-  const lastPingSentFor = useRef<string | null>(null);
   useEffect(() => {
     const ev = activeEvent;
     if (!ev || ev.status !== "ACTIVE") return;
@@ -156,7 +154,6 @@ export default function Dashboard() {
       () => {
         navigator.geolocation?.getCurrentPosition(
           async (pos) => {
-            lastPingSentFor.current = ev._id;
             await pingLocation({
               eventId: ev._id,
               latitude: pos.coords.latitude,
@@ -244,7 +241,7 @@ export default function Dashboard() {
                       </CardTitle>
                       <CardDescription>
                         Started{" "}
-                        {formatDuration(activeEvent.createdAt)} ago
+                        {formatDuration(activeEvent.createdAt, now)} ago
                         {" · "}
                         {new Date(activeEvent.createdAt).toLocaleTimeString()}
                       </CardDescription>

@@ -118,6 +118,16 @@ export const createEvent = mutation({
       .first();
     if (existing) return { eventId: existing._id };
 
+    // Also reuse a stuck CREATED event (e.g. the location prompt never
+    // resolved) rather than stacking duplicates.
+    const stuck = await ctx.db
+      .query("emergencyEvents")
+      .withIndex("by_user_status", (q) =>
+        q.eq("userId", userId).eq("status", "CREATED"),
+      )
+      .first();
+    if (stuck) return { eventId: stuck._id };
+
     const now = Date.now();
     const shareToken = generateToken();
     const eventId = await ctx.db.insert("emergencyEvents", {
