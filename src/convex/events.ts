@@ -2,6 +2,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
+import type { Doc } from "./_generated/dataModel";
 
 /**
  * Server-side coordinate validation. The browser is the only legitimate
@@ -33,6 +34,57 @@ function validateCoords(
 // Emergency events: creation, location, closure, pings
 // ---------------------------------------------------------------------------
 
+/**
+ * Explicit client projections: each query returns exactly the fields its
+ * return validator declares — never a raw database document (Convex rejects
+ * extra fields at runtime). Keeps userId and bookkeeping fields server-side.
+ */
+function projectActiveEvent(ev: Doc<"emergencyEvents">) {
+  return {
+    _id: ev._id,
+    status: ev.status,
+    locationStatus: ev.locationStatus,
+    latitude: ev.latitude,
+    longitude: ev.longitude,
+    accuracy: ev.accuracy,
+    liveSharing: ev.liveSharing,
+    shareToken: ev.shareToken,
+    notificationStatus: ev.notificationStatus,
+    notificationsAttemptedAt: ev.notificationsAttemptedAt,
+    createdAt: ev.createdAt,
+  };
+}
+
+function projectHistoryEvent(ev: Doc<"emergencyEvents">) {
+  return {
+    _id: ev._id,
+    status: ev.status,
+    locationStatus: ev.locationStatus,
+    notificationStatus: ev.notificationStatus,
+    liveSharing: ev.liveSharing,
+    createdAt: ev.createdAt,
+    resolvedAt: ev.resolvedAt,
+    resolutionReason: ev.resolutionReason,
+  };
+}
+
+function projectEventDetail(ev: Doc<"emergencyEvents">) {
+  return {
+    _id: ev._id,
+    status: ev.status,
+    locationStatus: ev.locationStatus,
+    latitude: ev.latitude,
+    longitude: ev.longitude,
+    accuracy: ev.accuracy,
+    liveSharing: ev.liveSharing,
+    shareToken: ev.shareToken,
+    notificationStatus: ev.notificationStatus,
+    createdAt: ev.createdAt,
+    resolvedAt: ev.resolvedAt,
+    resolutionReason: ev.resolutionReason,
+  };
+}
+
 export const activeEvent = query({
   args: {},
   returns: v.union(
@@ -63,7 +115,7 @@ export const activeEvent = query({
       )
       .order("desc")
       .take(1);
-    if (rows.length > 0) return rows[0];
+    if (rows.length > 0) return projectActiveEvent(rows[0]);
     const created = await ctx.db
       .query("emergencyEvents")
       .withIndex("by_user_status", (q) =>
@@ -71,7 +123,7 @@ export const activeEvent = query({
       )
       .order("desc")
       .take(1);
-    return created[0] ?? null;
+    return created[0] ? projectActiveEvent(created[0]) : null;
   },
 });
 
@@ -92,11 +144,12 @@ export const listEvents = query({
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
     if (userId === null) return [];
-    return await ctx.db
+    const rows = await ctx.db
       .query("emergencyEvents")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .order("desc")
       .take(Math.min(args.limit ?? 50, 100));
+    return rows.map(projectHistoryEvent);
   },
 });
 
@@ -105,7 +158,6 @@ export const getEvent = query({
   returns: v.union(
     v.object({
       _id: v.id("emergencyEvents"),
-      userId: v.id("users"),
       status: v.string(),
       locationStatus: v.string(),
       latitude: v.optional(v.number()),
@@ -125,7 +177,7 @@ export const getEvent = query({
     if (userId === null) return null;
     const ev = await ctx.db.get(args.id);
     if (!ev || ev.userId !== userId) return null;
-    return ev;
+    return projectEventDetail(ev);
   },
 });
 
@@ -335,11 +387,18 @@ export const listPings = query({
     if (userId === null) return [];
     const ev = await ctx.db.get(args.eventId);
     if (!ev || ev.userId !== userId) return [];
-    return await ctx.db
+    const pings = await ctx.db
       .query("locationPings")
       .withIndex("by_event_captured", (q) => q.eq("eventId", args.eventId))
       .order("desc")
       .take(200);
+    return pings.map((p) => ({
+      _id: p._id,
+      latitude: p.latitude,
+      longitude: p.longitude,
+      accuracy: p.accuracy,
+      capturedAt: p.capturedAt,
+    }));
   },
 });
 

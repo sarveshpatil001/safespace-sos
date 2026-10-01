@@ -233,10 +233,20 @@ export const listAttempts = query({
     if (userId === null) return [];
     const ev = await ctx.db.get(args.eventId);
     if (!ev || ev.userId !== userId) return [];
-    return await ctx.db
+    const rows = await ctx.db
       .query("notificationAttempts")
       .withIndex("by_event", (q) => q.eq("eventId", args.eventId))
       .order("desc")
       .collect();
+    // Explicit projection matching the return validator — never raw documents.
+    return rows.map((a) => ({
+      _id: a._id,
+      contactName: a.contactName,
+      channel: a.channel,
+      status: a.status,
+      providerMessageId: a.providerMessageId,
+      detail: a.detail,
+      attemptedAt: a.attemptedAt,
+    }));
   },
 });

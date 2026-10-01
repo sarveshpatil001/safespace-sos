@@ -62,11 +62,24 @@ export const listContacts = query({
   handler: async (ctx) => {
     const userId = await getAuthUserId(ctx);
     if (userId === null) return [];
-    return await ctx.db
+    const rows = await ctx.db
       .query("trustedContacts")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .order("desc")
       .collect();
+    // Explicit projection matching the return validator — never raw documents.
+    return rows.map((c) => ({
+      _id: c._id,
+      _creationTime: c._creationTime,
+      name: c.name,
+      relationship: c.relationship,
+      phone: c.phone,
+      email: c.email,
+      active: c.active,
+      notifySms: c.notifySms,
+      notifyEmail: c.notifyEmail,
+      createdAt: c.createdAt,
+    }));
   },
 });
 

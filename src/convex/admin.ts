@@ -52,7 +52,16 @@ export const adminListUsers = query({
     if (userId === null) return [];
     const admin = await ctx.db.get(userId);
     if (admin?.role !== "admin") return [];
-    return await ctx.db.query("users").order("desc").take(200);
+    const rows = await ctx.db.query("users").order("desc").take(200);
+    // Explicit projection matching the return validator — never raw documents.
+    return rows.map((u) => ({
+      _id: u._id,
+      name: u.name,
+      email: u.email,
+      phone: u.phone,
+      isAnonymous: u.isAnonymous,
+      _creationTime: u._creationTime,
+    }));
   },
 });
 
@@ -73,7 +82,17 @@ export const adminListEvents = query({
     if (userId === null) return [];
     const admin = await ctx.db.get(userId);
     if (admin?.role !== "admin") return [];
-    return await ctx.db.query("emergencyEvents").order("desc").take(100);
+    const rows = await ctx.db.query("emergencyEvents").order("desc").take(100);
+    // Explicit projection matching the return validator — never raw documents.
+    // userId is intentionally included: the admin table shows a user badge.
+    return rows.map((e) => ({
+      _id: e._id,
+      userId: e.userId,
+      status: e.status,
+      locationStatus: e.locationStatus,
+      notificationStatus: e.notificationStatus,
+      createdAt: e.createdAt,
+    }));
   },
 });
 
@@ -95,6 +114,14 @@ export const adminListAudit = query({
     if (userId === null) return [];
     const admin = await ctx.db.get(userId);
     if (admin?.role !== "admin") return [];
-    return await ctx.db.query("auditLogs").order("desc").take(100);
+    const rows = await ctx.db.query("auditLogs").order("desc").take(100);
+    // Explicit projection matching the return validator — never raw documents.
+    return rows.map((a) => ({
+      _id: a._id,
+      userId: a.userId,
+      action: a.action,
+      result: a.result,
+      createdAt: a.createdAt,
+    }));
   },
 });

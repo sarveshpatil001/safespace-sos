@@ -40,10 +40,18 @@ export const listMine = query({
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
     if (userId === null) return [];
-    return await ctx.db
+    const rows = await ctx.db
       .query("auditLogs")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .order("desc")
       .take(Math.min(args.limit ?? MAX_LOGS, MAX_LOGS));
+    // Explicit projection matching the return validator — never raw documents.
+    return rows.map((a) => ({
+      _id: a._id,
+      action: a.action,
+      resource: a.resource,
+      result: a.result,
+      createdAt: a.createdAt,
+    }));
   },
 });

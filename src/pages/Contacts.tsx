@@ -28,7 +28,21 @@ import {
 import { Info, Pencil, Phone, Plus, Trash2, UserRound } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
-import type { Doc, Id } from "@/convex/_generated/dataModel";
+import type { Id } from "@/convex/_generated/dataModel";
+
+/** Shape returned by contacts:listContacts (owner/bookkeeping fields stay server-side). */
+type ContactListItem = {
+  _id: Id<"trustedContacts">;
+  _creationTime: number;
+  name: string;
+  relationship?: string;
+  phone: string;
+  email?: string;
+  active: boolean;
+  notifySms: boolean;
+  notifyEmail: boolean;
+  createdAt: number;
+};
 
 interface ContactFormState {
   name: string;
@@ -60,7 +74,7 @@ export default function Contacts() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<Id<"trustedContacts"> | null>(null);
   const [form, setForm] = useState<ContactFormState>(EMPTY_FORM);
-  const [deleteTarget, setDeleteTarget] = useState<Doc<"trustedContacts"> | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ContactListItem | null>(null);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -71,7 +85,7 @@ export default function Contacts() {
     setDialogOpen(true);
   };
 
-  const openEdit = (contact: Doc<"trustedContacts">) => {
+  const openEdit = (contact: ContactListItem) => {
     setEditingId(contact._id);
     setForm({
       name: contact.name,
@@ -131,7 +145,7 @@ export default function Contacts() {
     }
   };
 
-  const handleToggleActive = async (contact: Doc<"trustedContacts">) => {
+  const handleToggleActive = async (contact: ContactListItem) => {
     try {
       await setContactActive({ id: contact._id, active: !contact.active });
     } catch (err) {
