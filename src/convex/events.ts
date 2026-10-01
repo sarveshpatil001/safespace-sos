@@ -1,0 +1,381 @@
+import { getAuthUserId } from "@convex-dev/auth/server";
+import { v } from "convex/values";
+import { mutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
+
+// ---------------------------------------------------------------------------
+// Emergency events: creation, location, closure, pings
+// ---------------------------------------------------------------------------
+
+export const activeEvent = query({
+  args: {},
+  returns: v.union(
+    v.object({
+      _id: v.id("emergencyEvents"),
+      status: v.string(),
+      locationStatus: v.string(),
+      latitude: v.optional(v.number()),
+      longitude: v.optional(v.number()),
+      accuracy: v.optional(v.number()),
+      liveSharing: v.boolean(),
+      shareToken: v.optional(v.string()),
+      notificationStatus: v.string(),
+      createdAt: v.number(),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) return null;
+    // A live event is either ACTIVE (location captured) or CREATED
+    // (recorded, still waiting on the location prompt outcome).
+    const rows = await ctx.db
+      .query("emergencyEvents")
+      .withIndex("by_user_status", (q) =>
+        q.eq("userId", userId).eq("status", "ACTIVE"),
+      )
+      .order("desc")
+      .take(1);
+    if (rows.length > 0) return rows[0];
+    const created = await ctx.db
+      .query("emergencyEvents")
+      .withIndex("by_user_status", (q) =>
+        q.eq("userId", userId).eq("status", "CREATED"),
+      )
+      .order("desc")
+      .take(1);
+    return created[0] ?? null;
+  },
+});
+
+export const listEvents = query({
+  args: { limit: v.optional(v.number()) },
+  returns: v.array(
+    v.object({
+      _id: v.id("emergencyEvents"),
+      status: v.string(),
+      locationStatus: v.string(),
+      notificationStatus: v.string(),
+      liveSharing: v.boolean(),
+      createdAt: v.number(),
+      resolvedAt: v.optional(v.number()),
+      resolutionReason: v.optional(v.string()),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) return [];
+    return await ctx.db
+      .query("emergencyEvents")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .order("desc")
+      .take(Math.min(args.limit ?? 50, 100));
+  },
+});
+
+export const getEvent = query({
+  args: { id: v.id("emergencyEvents") },
+  returns: v.union(
+    v.object({
+      _id: v.id("emergencyEvents"),
+      userId: v.id("users"),
+      status: v.string(),
+      locationStatus: v.string(),
+      latitude: v.optional(v.number()),
+      longitude: v.optional(v.number()),
+      accuracy: v.optional(v.number()),
+      liveSharing: v.boolean(),
+      shareToken: v.optional(v.string()),
+      notificationStatus: v.string(),
+      createdAt: v.number(),
+      resolvedAt: v.optional(v.number()),
+      resolutionReason: v.optional(v.string()),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) return null;
+    const ev = await ctx.db.get(args.id);
+    if (!ev || ev.userId !== userId) return null;
+    return ev;
+  },
+});
+
+export const createEvent = mutation({
+  args: {},
+  returns: v.object({ eventId: v.id("emergencyEvents") }),
+  handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Not authenticated");
+
+    // Reuse an existing live event instead of creating duplicates.
+    const existing = await ctx.db
+      .query("emergencyEvents")
+      .withIndex("by_user_status", (q) =>
+        q.eq("userId", userId).eq("status", "ACTIVE"),
+      )
+      .first();
+    if (existing) return { eventId: existing._id };
+
+    const now = Date.now();
+    const shareToken = generateToken();
+    const eventId = await ctx.db.insert("emergencyEvents", {
+      userId,
+      status: "CREATED",
+      locationStatus: "PENDING",
+      liveSharing: false,
+      shareToken,
+      notificationStatus: "PENDING",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.runMutation(internal.audit.logInternal, {
+      userId,
+      actorType: "user",
+      action: "emergency.created",
+      resource: eventId,
+      result: "SUCCESS",
+    });
+
+    return { eventId };
+  },
+});
+
+export const setLocation = mutation({
+  args: {
+    eventId: v.id("emergencyEvents"),
+    status: v.union(
+      v.literal("AVAILABLE"),
+      v.literal("DENIED"),
+      v.literal("TIMEOUT"),
+      v.literal("UNAVAILABLE"),
+      v.literal("UNSUPPORTED"),
+    ),
+    latitude: v.optional(v.number()),
+    longitude: v.optional(v.number()),
+    accuracy: v.optional(v.number()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Not authenticated");
+    const ev = await ctx.db.get(args.eventId);
+    if (!ev || ev.userId !== userId) throw new Error("Event not found");
+    if (ev.status === "RESOLVED" || ev.status === "CANCELLED") return null;
+
+    const now = Date.now();
+    if (args.status === "AVAILABLE") {
+      if (
+        typeof args.latitude !== "number" ||
+        typeof args.longitude !== "number"
+      ) {
+        throw new Error("Coordinates required when status is AVAILABLE");
+      }
+      await ctx.db.patch(args.eventId, {
+        status: ev.status === "CREATED" ? "ACTIVE" : ev.status,
+        locationStatus: "AVAILABLE",
+        latitude: args.latitude,
+        longitude: args.longitude,
+        accuracy: args.accuracy,
+        locationCapturedAt: now,
+        liveSharing: true,
+        shareToken: ev.shareToken ?? generateToken(),
+        updatedAt: now,
+      });
+      await ctx.db.insert("locationPings", {
+        eventId: args.eventId,
+        userId,
+        latitude: args.latitude,
+        longitude: args.longitude,
+        accuracy: args.accuracy,
+        capturedAt: now,
+        createdAt: now,
+      });
+    } else {
+      await ctx.db.patch(args.eventId, {
+        status: ev.status === "CREATED" ? "ACTIVE" : ev.status,
+        locationStatus: args.status,
+        updatedAt: now,
+      });
+    }
+    return null;
+  },
+});
+
+/** Resolve or cancel an event. Closing never claims to cancel a 112 call. */
+export const closeEvent = mutation({
+  args: {
+    eventId: v.id("emergencyEvents"),
+    resolution: v.union(v.literal("RESOLVED"), v.literal("CANCELLED")),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Not authenticated");
+    const ev = await ctx.db.get(args.eventId);
+    if (!ev || ev.userId !== userId) throw new Error("Event not found");
+    if (ev.status === "RESOLVED" || ev.status === "CANCELLED") return null;
+
+    const now = Date.now();
+    await ctx.db.patch(args.eventId, {
+      status: args.resolution,
+      resolvedAt: now,
+      resolutionReason:
+        args.resolution === "CANCELLED"
+          ? "Marked as false alarm by user"
+          : "Marked as handled by user",
+      liveSharing: false,
+      shareRevokedAt: ev.shareRevokedAt ?? now,
+      updatedAt: now,
+    });
+
+    await ctx.runMutation(internal.audit.logInternal, {
+      userId,
+      actorType: "user",
+      action:
+        args.resolution === "CANCELLED"
+          ? "emergency.cancelled"
+          : "emergency.resolved",
+      resource: args.eventId,
+      result: "SUCCESS",
+    });
+    return null;
+  },
+});
+
+export const pingLocation = mutation({
+  args: {
+    eventId: v.id("emergencyEvents"),
+    latitude: v.number(),
+    longitude: v.number(),
+    accuracy: v.optional(v.number()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Not authenticated");
+    const ev = await ctx.db.get(args.eventId);
+    if (!ev || ev.userId !== userId) throw new Error("Event not found");
+    if (ev.status === "RESOLVED" || ev.status === "CANCELLED") return null;
+
+    const now = Date.now();
+    await ctx.db.patch(args.eventId, {
+      lastPingAt: now,
+      lastLatitude: args.latitude,
+      lastLongitude: args.longitude,
+      lastAccuracy: args.accuracy,
+      latitude: args.latitude,
+      longitude: args.longitude,
+      accuracy: args.accuracy,
+      locationStatus: "AVAILABLE",
+      locationCapturedAt: now,
+      updatedAt: now,
+    });
+    await ctx.db.insert("locationPings", {
+      eventId: args.eventId,
+      userId,
+      latitude: args.latitude,
+      longitude: args.longitude,
+      accuracy: args.accuracy,
+      capturedAt: now,
+      createdAt: now,
+    });
+    return null;
+  },
+});
+
+export const listPings = query({
+  args: { eventId: v.id("emergencyEvents") },
+  returns: v.array(
+    v.object({
+      _id: v.id("locationPings"),
+      latitude: v.number(),
+      longitude: v.number(),
+      accuracy: v.optional(v.number()),
+      capturedAt: v.number(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) return [];
+    const ev = await ctx.db.get(args.eventId);
+    if (!ev || ev.userId !== userId) return [];
+    return await ctx.db
+      .query("locationPings")
+      .withIndex("by_event_captured", (q) => q.eq("eventId", args.eventId))
+      .order("desc")
+      .take(200);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Share link (token-scoped, no auth)
+// ---------------------------------------------------------------------------
+
+export const shareByToken = query({
+  args: { token: v.string() },
+  returns: v.union(
+    v.object({
+      eventId: v.id("emergencyEvents"),
+      userName: v.optional(v.string()),
+      status: v.string(),
+      locationStatus: v.string(),
+      latitude: v.optional(v.number()),
+      longitude: v.optional(v.number()),
+      accuracy: v.optional(v.number()),
+      lastPingAt: v.optional(v.number()),
+      startedAt: v.number(),
+      liveSharing: v.boolean(),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx, args) => {
+    const ev = await ctx.db
+      .query("emergencyEvents")
+      .withIndex("by_share_token", (q) => q.eq("shareToken", args.token))
+      .first();
+    if (!ev) return null;
+    if (!ev.liveSharing || ev.shareRevokedAt) return null;
+    if (ev.status === "RESOLVED" || ev.status === "CANCELLED") return null;
+    const user = await ctx.db.get(ev.userId);
+    return {
+      eventId: ev._id,
+      userName: user?.name,
+      status: ev.status,
+      locationStatus: ev.locationStatus,
+      latitude: ev.lastLatitude ?? ev.latitude,
+      longitude: ev.lastLongitude ?? ev.longitude,
+      accuracy: ev.lastAccuracy ?? ev.accuracy,
+      lastPingAt: ev.lastPingAt,
+      startedAt: ev.createdAt,
+      liveSharing: ev.liveSharing,
+    };
+  },
+});
+
+export const revokeShare = mutation({
+  args: { eventId: v.id("emergencyEvents") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Not authenticated");
+    const ev = await ctx.db.get(args.eventId);
+    if (!ev || ev.userId !== userId) throw new Error("Event not found");
+    await ctx.db.patch(args.eventId, {
+      liveSharing: false,
+      shareRevokedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    return null;
+  },
+});
+
+function generateToken(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
