@@ -1,5 +1,7 @@
-// TEMPORARY defensive security audit suite (deleted after audit).
-// Uses only synthetic guest test accounts (anonymous provider) and test data.
+// SafeSpace security regression suite (defensive).
+// Covers: two-user isolation, admin gating, unauthenticated access, input
+// validation, SOS lifecycle, notification dedup, share-token model, abuse caps.
+// Run: bun sec-audit.mjs   (uses synthetic anonymous guest test users only)
 import { ConvexHttpClient } from "convex/browser";
 
 const URL = "https://sincere-eel-229.convex.cloud";
@@ -63,15 +65,19 @@ const ev = await A.query("events:getEvent", { id: eventId });
   ? pass("event ACTIVE + share token 48 hex chars", `status=${ev.status} tokenLen=${ev.shareToken?.length}`)
   : fail("event ACTIVE + share token", JSON.stringify(ev).slice(0, 120));
 
-// notification dedup facts (baseline vs hardened)
+// notification dedup facts (baseline vs hardened): growth must STOP after repeat calls
 const n1 = await A.mutation("notifications:notifyContacts", { eventId });
 const attempts1 = await A.query("notifications:listAttempts", { eventId });
 const n2 = await A.mutation("notifications:notifyContacts", { eventId });
 const attempts2 = await A.query("notifications:listAttempts", { eventId });
+await A.mutation("notifications:notifyContacts", { eventId });
+await A.mutation("notifications:notifyContacts", { eventId });
+const attempts4 = await A.query("notifications:listAttempts", { eventId });
 fact("notify1", n1); fact("notify2", n2);
 fact("attemptRowsAfterFirst", attempts1.length);
 fact("attemptRowsAfterSecondCall", attempts2.length);
-fact("attemptRowDeltaOnRepeatCall", attempts2.length - attempts1.length);
+fact("attemptRowsAfterFourthCall", attempts4.length);
+fact("attemptRowGrowthCalls2to4", attempts4.length - attempts2.length);
 
 // ping cadence facts
 const pings1 = await A.query("events:listPings", { eventId });
@@ -79,7 +85,7 @@ await expectOk("A pingLocation valid", () => A.mutation("events:pingLocation", {
 await A.mutation("events:pingLocation", { eventId, latitude: 38.7225, longitude: -9.1395, accuracy: 25 }).catch(() => {});
 await A.mutation("events:pingLocation", { eventId, latitude: 38.7226, longitude: -9.1396, accuracy: 25 }).catch(() => {});
 const pings2 = await A.query("events:listPings", { eventId });
-fact("pingRowsDeltaAfter3RapidPings", pings2.length - pings1.length);
+fact("pingRowsAfter3RapidPings", pings2.length - pings1.length);
 
 // --- input validation (must reject in BOTH runs) --------------------------
 await expectError("setLocation lat=999 rejected", () =>
@@ -91,9 +97,9 @@ await expectError("pingLocation lat=95 rejected", () =>
 await expectError("pingLocation negative accuracy rejected", () =>
   A.mutation("events:pingLocation", { eventId, latitude: 0, longitude: 0, accuracy: -5 }), /Invalid accuracy/i);
 await expectError("contact id used as eventId rejected", () =>
-  A.mutation("events:closeEvent", { eventId: contact, resolution: "RESOLVED" }), /[Ii]nvalid|Uncaught|does not exist|not found/i);
-await expectError("contact id used as contactId for other-user check prep", () =>
-  A.mutation("contacts:setContactActive", { id: eventId, active: false }), /[Ii]nvalid|not found/i);
+  A.mutation("events:closeEvent", { eventId: contact, resolution: "RESOLVED" }), /[Ii]nvalid|Uncaught|does not exist|not found|ArgumentValidation/i);
+await expectError("event id used as contactId rejected", () =>
+  A.mutation("contacts:setContactActive", { id: eventId, active: false }), /[Ii]nvalid|not found|ArgumentValidation/i);
 
 // --- two-user isolation (must hold in BOTH runs) --------------------------
 (await B.query("events:getEvent", { id: eventId })) === null ? pass("B getEvent(A) -> null", "denied") : fail("B getEvent(A)", "LEAK");
@@ -147,13 +153,13 @@ const shareClient = new ConvexHttpClient(URL);
 const share = await shareClient.query("events:shareByToken", { token: ev.shareToken });
 const shareKeys = share ? Object.keys(share).sort() : [];
 const expectedKeys = ["accuracy", "lastPingAt", "latitude", "liveSharing", "locationStatus", "longitude", "startedAt", "status", "userName"];
-const allowedShare = shareKeys.every((k) => expectedKeys.includes(k));
 const forbidden = ["_id", "_creationTime", "userId", "shareToken", "shareRevokedAt", "email", "phone", "resolutionReason"];
+const allowedShare = shareKeys.every((k) => expectedKeys.includes(k));
 const noForbidden = shareKeys.every((k) => !forbidden.includes(k));
 allowedShare && noForbidden
   ? pass("share returns ONLY intended public fields", shareKeys.join(","))
   : fail("share fields", JSON.stringify(shareKeys));
-(!share || !("_id" in share) && !("userId" in share) && !("shareToken" in share)) ? pass("share leaks no internal ids", "ok") : fail("share leaks", JSON.stringify(share).slice(0, 100));
+(!share || (!("_id" in share) && !("userId" in share) && !("shareToken" in share))) ? pass("share leaks no internal ids", "ok") : fail("share leaks", JSON.stringify(share).slice(0, 100));
 (await shareClient.query("events:shareByToken", { token: "deadbeef".repeat(6) })) === null ? pass("garbage token -> null", "ok") : fail("garbage token", "returned data!");
 
 await expectOk("A revokeShare(own)", () => A.mutation("events:revokeShare", { eventId }));
@@ -170,7 +176,7 @@ await expectError("notifyContacts on closed event rejected", () =>
   A.mutation("notifications:notifyContacts", { eventId }), /Event is closed/i);
 await expectOk("closeEvent idempotent", () => A.mutation("events:closeEvent", { eventId, resolution: "RESOLVED" }));
 
-// --- SOS creation rate cap (fact: baseline has none, hardened caps at 20/h) --
+// --- SOS creation rate cap (fact: baseline none, hardened caps at 20/h) -----
 let created = 0, capped = false, capMsg = "";
 for (let i = 0; i < 25; i++) {
   const r = await outcome(async () => {
@@ -179,7 +185,7 @@ for (let i = 0; i < 25; i++) {
     return e2;
   });
   if (r.ok) created++;
-  else { capped = true; capMsg = r.error.slice(0, 90); break; }
+  else { capped = true; capMsg = r.error.slice(0, 110); break; }
 }
 fact("sosCreateSuccessesBeforeCap", created);
 fact("sosCreateCapHit", capped);

@@ -271,6 +271,9 @@ export const setLocation = mutation({
 
     const now = Date.now();
     if (args.status === "AVAILABLE") {
+      // Validate first: malformed coordinates are always rejected loudly,
+      // regardless of cadence guards.
+      const coords = validateCoords(args.latitude, args.longitude, args.accuracy);
       // Cadence guard: the very first capture always runs; rapid repeats
       // against an already-active event within 10s are silent no-ops so a
       // scripted client cannot grow the ping table without bound. The UI
@@ -282,7 +285,6 @@ export const setLocation = mutation({
       ) {
         return null;
       }
-      const coords = validateCoords(args.latitude, args.longitude, args.accuracy);
       await ctx.db.patch(args.eventId, {
         status: ev.status === "CREATED" ? "ACTIVE" : ev.status,
         locationStatus: "AVAILABLE",
@@ -371,6 +373,9 @@ export const pingLocation = mutation({
     if (ev.status === "RESOLVED" || ev.status === "CANCELLED") return null;
 
     const now = Date.now();
+    // Validate first: malformed coordinates are always rejected loudly,
+    // regardless of cadence guards.
+    const coords = validateCoords(args.latitude, args.longitude, args.accuracy);
     // Cadence guard: the UI pings every 30s while the event is open; anything
     // faster than 10s is dropped silently so a scripted client cannot grow the
     // locationPings table without bound during an active emergency.
@@ -378,7 +383,6 @@ export const pingLocation = mutation({
       return null;
     }
 
-    const coords = validateCoords(args.latitude, args.longitude, args.accuracy);
     await ctx.db.patch(args.eventId, {
       lastPingAt: now,
       lastLatitude: coords.latitude,
