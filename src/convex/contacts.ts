@@ -97,6 +97,17 @@ export const createContact = mutation({
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
     if (userId === null) throw new Error("Not authenticated");
+
+    // Abuse cap: bound per-user contact rows (each contact can become a real
+    // notification target during SOS, so growth must be finite).
+    const existing = await ctx.db
+      .query("trustedContacts")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .take(51);
+    if (existing.length >= 50) {
+      throw new Error("Contact limit reached (50). Remove a contact to add another.");
+    }
+
     const name = args.name.trim().replace(/\s+/g, " ").slice(0, 80);
     if (!name) throw new Error("Contact name is required");
     const phone = normalizePhone(args.phone);

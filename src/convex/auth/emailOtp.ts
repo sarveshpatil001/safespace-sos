@@ -26,7 +26,10 @@ export const emailOtp = Email({
         },
         {
           headers: {
-            "x-api-key": "fb_email_2crN1hqIArZP2bEfvjp5Qik4",
+            // Sender credential is deployment configuration, never source
+            // code: set via the platform's Keys/API keys UI (env var). The
+            // value must never be committed here.
+            "x-api-key": process.env.VLY_OTP_SENDER_API_KEY ?? "",
           },
         },
       );

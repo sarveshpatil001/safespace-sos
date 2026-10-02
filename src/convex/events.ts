@@ -188,6 +188,21 @@ export const createEvent = mutation({
     const userId = await getAuthUserId(ctx);
     if (userId === null) throw new Error("Not authenticated");
 
+    // Abuse cap: at most 20 emergencies per user per rolling hour. Real use
+    // is one or two; this only bounds scripted create/close cycling and the
+    // token/notification rows that come with each event.
+    const recent = await ctx.db
+      .query("emergencyEvents")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .order("desc")
+      .take(21);
+    const oneHourAgo = Date.now() - 3_600_000;
+    if (recent.filter((e) => e.createdAt >= oneHourAgo).length >= 20) {
+      throw new Error(
+        "Too many emergencies created in the last hour. Please wait before trying again.",
+      );
+    }
+
     // Reuse an existing live event instead of creating duplicates.
     const existing = await ctx.db
       .query("emergencyEvents")
@@ -256,6 +271,17 @@ export const setLocation = mutation({
 
     const now = Date.now();
     if (args.status === "AVAILABLE") {
+      // Cadence guard: the very first capture always runs; rapid repeats
+      // against an already-active event within 10s are silent no-ops so a
+      // scripted client cannot grow the ping table without bound. The UI
+      // calls setLocation once per event, so normal use is unaffected.
+      if (
+        ev.status === "ACTIVE" &&
+        ev.locationCapturedAt !== undefined &&
+        now - ev.locationCapturedAt < 10_000
+      ) {
+        return null;
+      }
       const coords = validateCoords(args.latitude, args.longitude, args.accuracy);
       await ctx.db.patch(args.eventId, {
         status: ev.status === "CREATED" ? "ACTIVE" : ev.status,
@@ -344,8 +370,15 @@ export const pingLocation = mutation({
     if (!ev || ev.userId !== userId) throw new Error("Event not found");
     if (ev.status === "RESOLVED" || ev.status === "CANCELLED") return null;
 
-    const coords = validateCoords(args.latitude, args.longitude, args.accuracy);
     const now = Date.now();
+    // Cadence guard: the UI pings every 30s while the event is open; anything
+    // faster than 10s is dropped silently so a scripted client cannot grow the
+    // locationPings table without bound during an active emergency.
+    if (ev.lastPingAt !== undefined && now - ev.lastPingAt < 10_000) {
+      return null;
+    }
+
+    const coords = validateCoords(args.latitude, args.longitude, args.accuracy);
     await ctx.db.patch(args.eventId, {
       lastPingAt: now,
       lastLatitude: coords.latitude,

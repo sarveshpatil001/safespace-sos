@@ -13,6 +13,15 @@ import { internal } from "./_generated/api";
  * message. If the integration key is missing the attempt is recorded as
  * FAILED with a `not_configured` detail — never as sent.
  */
+/** Minimal HTML escaping for user-authored values interpolated into emails. */
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export const sendEmail = internalAction({
   args: {
     eventId: v.id("emergencyEvents"),
@@ -53,8 +62,9 @@ export const sendEmail = internalAction({
       const shareLine = shareUrl
         ? `<p><strong>Live location:</strong> <a href="${shareUrl}">Follow live updates</a> (updated continuously while the emergency is active)</p>`
         : "<p><strong>Live location:</strong> not enabled for this emergency</p>";
+      const safeUserName = escapeHtml(args.userName);
       const phoneLine = args.userPhone
-        ? `<p><strong>Phone:</strong> ${args.userPhone}</p>`
+        ? `<p><strong>Phone:</strong> ${escapeHtml(args.userPhone)}</p>`
         : "";
 
       try {
@@ -67,14 +77,13 @@ export const sendEmail = internalAction({
                 <h1 style="margin: 0; font-size: 18px;">EMERGENCY ALERT</h1>
               </div>
               <div style="border: 1px solid #e5e7eb; border-top: 0; padding: 20px; border-radius: 0 0 8px 8px;">
-                <p><strong>${args.userName}</strong> raised an emergency in SafeSpace at
+                <p><strong>${safeUserName}</strong> raised an emergency in SafeSpace at
                 <strong>${new Date(args.startedAt).toLocaleString()}</strong>.</p>
                 ${mapsLine}
                 ${shareLine}
-                ${phoneLine}
-                <p style="margin-top: 16px; font-size: 13px; color: #6b7280;">
-                  You are listed as a trusted contact. If you can, reach out to
-                  ${args.userName} now or go to their location. If you believe
+                ${phoneLine}                  <p style="margin-top: 16px; font-size: 13px; color: #6b7280;">
+                    You are listed as a trusted contact. If you can, reach out to
+                    ${safeUserName} now or go to their location. If you believe
                   there is immediate danger to life, contact your local emergency
                   number.
                 </p>

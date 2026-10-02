@@ -81,8 +81,12 @@ export const notifyContacts = mutation({
     const smsConfigured = false;
 
     // Abuse cap: at most one scheduled email attempt per contact per event.
-    // Without this, calling notifyContacts in a loop would stack scheduler
-    // runs and blast the real email provider repeatedly.
+    // Two layers:
+    //   1. Event-level lock — provider sends may only be scheduled while
+    //      notificationsAttemptedAt is unset (i.e. by the first call). Without
+    //      this, calls fired before the first attempt row was recorded would
+    //      each schedule another real email (amplification race).
+    //   2. Per-contact dedup — recorded attempts are never scheduled again.
     const existingAttempts = await ctx.db
       .query("notificationAttempts")
       .withIndex("by_event", (q) => q.eq("eventId", args.eventId))
@@ -92,6 +96,10 @@ export const notifyContacts = mutation({
         .filter((a) => a.channel === "email")
         .map((a) => a.contactId),
     );
+    const attemptedKeys = new Set(
+      existingAttempts.map((a) => `${a.channel}:${a.contactId ?? "none"}`),
+    );
+    const schedulingLocked = ev.notificationsAttemptedAt !== undefined;
 
     const now = Date.now();
     let scheduled = 0;
@@ -104,7 +112,13 @@ export const notifyContacts = mutation({
 
       for (const channel of channels) {
         if (channel === "email") {
-          if (!alreadyScheduled.has(contact._id) && contact.email && emailConfigured) {
+          const email = contact.email;
+          const canSchedule =
+            !schedulingLocked &&
+            !alreadyScheduled.has(contact._id) &&
+            !!email &&
+            emailConfigured;
+          if (canSchedule) {
             scheduled++;
             alreadyScheduled.add(contact._id);
             await ctx.scheduler.runAfter(
@@ -114,7 +128,7 @@ export const notifyContacts = mutation({
                 eventId: args.eventId,
                 contactId: contact._id,
                 contactName: contact.name,
-                to: contact.email,
+                to: email,
                 userName: user?.name ?? "Someone you trust",
                 userPhone: user?.phone,
                 latitude: ev.latitude,
@@ -126,35 +140,55 @@ export const notifyContacts = mutation({
             );
           } else {
             skipped++;
-            await ctx.db.insert("notificationAttempts", {
-              eventId: args.eventId,
-              userId,
-              contactId: contact._id,
-              contactName: contact.name,
-              channel: "email",
-              status: "NOT_CONFIGURED",
-              detail: !contact.email
-                ? "Contact has no email address on file"
-                : "Email provider not configured",
-              attemptedAt: now,
-            });
+            // Record the reason once per contact+channel — repeat calls must
+            // not stack duplicate rows in the attempts table.
+            const key = `email:${contact._id}`;
+            if (!attemptedKeys.has(key)) {
+              attemptedKeys.add(key);
+              let status: "NOT_CONFIGURED" | "SKIPPED";
+              let detail: string;
+              if (!contact.email) {
+                status = "NOT_CONFIGURED";
+                detail = "Contact has no email address on file";
+              } else if (!emailConfigured) {
+                status = "NOT_CONFIGURED";
+                detail = "Email provider not configured";
+              } else {
+                status = "SKIPPED";
+                detail = "Notification already scheduled for this emergency";
+              }
+              await ctx.db.insert("notificationAttempts", {
+                eventId: args.eventId,
+                userId,
+                contactId: contact._id,
+                contactName: contact.name,
+                channel: "email",
+                status,
+                detail,
+                attemptedAt: now,
+              });
+            }
           }
         } else if (channel === "sms") {
           if (smsConfigured) {
             // Real SMS provider scheduling would go here.
           } else {
             skipped++;
-            await ctx.db.insert("notificationAttempts", {
-              eventId: args.eventId,
-              userId,
-              contactId: contact._id,
-              contactName: contact.name,
-              channel: "sms",
-              status: "NOT_CONFIGURED",
-              detail:
-                "SMS is prepared but no SMS provider is connected yet — no message was sent. Enable email notifications for this contact, or connect an SMS provider.",
-              attemptedAt: now,
-            });
+            const key = `sms:${contact._id}`;
+            if (!attemptedKeys.has(key)) {
+              attemptedKeys.add(key);
+              await ctx.db.insert("notificationAttempts", {
+                eventId: args.eventId,
+                userId,
+                contactId: contact._id,
+                contactName: contact.name,
+                channel: "sms",
+                status: "NOT_CONFIGURED",
+                detail:
+                  "SMS is prepared but no SMS provider is connected yet — no message was sent. Enable email notifications for this contact, or connect an SMS provider.",
+                attemptedAt: now,
+              });
+            }
           }
         }
       }
